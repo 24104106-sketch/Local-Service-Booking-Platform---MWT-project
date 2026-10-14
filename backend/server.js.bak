@@ -1,0 +1,508 @@
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+require('dotenv').config();
+const http = require('http');
+const express = require('express');
+const cors = require('cors');
+const { Server } = require('socket.io');
+
+const { connectDB, isDBConnected, sequelize } = require('./config/database');
+const models = require('./models'); // Ensure all associations are initialized
+const errorHandler = require('./middleware/errorHandler');
+
+// Route imports
+const authRoutes = require('./routes/authRoutes');
+const serviceRoutes = require('./routes/serviceRoutes');
+const providerRoutes = require('./routes/providerRoutes');
+const bookingRoutes = require('./routes/bookingRoutes');
+const chatRoutes = require('./routes/chatRoutes');
+const chatbotRoutes = require('./routes/chatbotRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const reviewRoutes = require('./routes/reviewRoutes');
+const complaintRoutes = require('./routes/complaintRoutes');
+const walletRoutes = require('./routes/walletRoutes');
+const adminRoutes = require('./routes/adminRoutes');
+const communityRoutes = require('./routes/communityRoutes');
+const recentlyAccessedRoutes = require('./routes/recentlyAccessedRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+
+const app = express();
+const server = http.createServer(app);
+
+// Setup Socket.IO with CORS
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+const corsOriginHandler = (origin, callback) => {
+  if (!origin || origin === CLIENT_URL || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+    return callback(null, true);
+  }
+  return callback(null, true);
+};
+
+const io = new Server(server, {
+  cors: {
+    origin: corsOriginHandler,
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+  }
+});
+
+// Store io in express app for access in controllers
+app.set('io', io);
+
+// Express Middleware
+app.use(cors({
+  origin: corsOriginHandler,
+  credentials: true
+}));
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
+app.use(express.urlencoded({ extended: true }));
+
+const jwt = require('jsonwebtoken');
+const { getJwtSecret } = require('./middleware/auth');
+
+// Socket.IO Authentication Middleware
+io.use(async (socket, next) => {
+  try {
+    const rawToken = socket.handshake.auth?.token || socket.handshake.headers?.authorization;
+    let token = null;
+    if (rawToken && typeof rawToken === 'string') {
+      token = rawToken.startsWith('Bearer ') ? rawToken.split(' ')[1] : rawToken;
+    }
+
+    if (!token) {
+      socket.user = null;
+      return next();
+    }
+
+    const secret = getJwtSecret();
+    if (!secret) {
+      socket.user = null;
+      return next();
+    }
+
+    const decoded = jwt.verify(token, secret);
+    if (isDBConnected()) {
+      const user = await models.User.findByPk(decoded.id);
+      if (user && user.status !== 'suspended') {
+        socket.user = user;
+      } else {
+        socket.user = null;
+      }
+    } else {
+      socket.user = decoded;
+    }
+    next();
+  } catch (err) {
+    socket.user = null;
+    next();
+  }
+});
+
+// Socket.IO Events
+io.on('connection', (socket) => {
+  console.log(`[Socket.IO] Client connected: ${socket.id} (Authenticated user: ${socket.user?.id || 'guest'})`);
+
+  if (socket.user && socket.user.id) {
+    socket.join(`user:${socket.user.id}`);
+    if (socket.user.role === 'admin') {
+      socket.join('admin');
+    }
+  }
+
+  // User joins their personal room for direct notifications (Authenticated check)
+  socket.on('join_user', async (userId, maybeToken) => {
+    try {
+      if (!userId) return;
+      if (!socket.user) {
+        const rawToken = maybeToken || socket.handshake.auth?.token || socket.handshake.headers?.authorization;
+        if (rawToken && typeof rawToken === 'string') {
+          const token = rawToken.startsWith('Bearer ') ? rawToken.split(' ')[1] : rawToken;
+          const secret = getJwtSecret();
+          if (secret) {
+            try {
+              const decoded = jwt.verify(token, secret);
+              if (isDBConnected()) {
+                const user = await models.User.findByPk(decoded.id);
+                if (user && user.status !== 'suspended') {
+                  socket.user = user;
+                }
+              } else {
+                socket.user = decoded;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      const uid = Number(userId);
+      if (socket.user && (socket.user.id === uid || socket.user.role === 'admin')) {
+        socket.join(`user:${uid}`);
+        if (socket.user.role === 'admin') {
+          socket.join('admin');
+        }
+      }
+    } catch (e) {
+      console.error('[Socket.IO] Error in join_user:', e.message);
+    }
+  });
+
+  // Helper to resolve booking by integer ID, booking number (e.g. FIX-..., BK...)
+  const findBookingHelper = async (idOrNumber) => {
+    if (!idOrNumber) return null;
+    const strId = String(idOrNumber).trim();
+    if (!isNaN(Number(strId))) {
+      const byPk = await models.Booking.findByPk(Number(strId));
+      if (byPk) return byPk;
+    }
+    const { Op } = require('sequelize');
+    const cleanNumeric = strId.replace(/^(BK|FIX-?)/i, '');
+    const searchConditions = [{ booking_number: strId }];
+    if (!isNaN(Number(cleanNumeric)) && Number(cleanNumeric) > 0) {
+      searchConditions.push({ id: Number(cleanNumeric) });
+    }
+    return await models.Booking.findOne({
+      where: {
+        [Op.or]: searchConditions
+      }
+    });
+  };
+
+  // Client joins a specific booking room (with strict ownership & authorization check)
+  socket.on('join_booking', async (bookingId, callback) => {
+    try {
+      if (!bookingId) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Booking ID required' });
+        return;
+      }
+
+      if (!socket.user) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Authentication required to track booking' });
+        return;
+      }
+
+      const booking = await findBookingHelper(bookingId);
+      if (!booking) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Booking not found' });
+        return;
+      }
+
+      const userId = socket.user.id;
+      const isCustomer = booking.customer_id === userId;
+      const isAssignedProvider = booking.provider_id === userId;
+      const isAdmin = socket.user.role === 'admin';
+
+      if (!isCustomer && !isAssignedProvider && !isAdmin) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Forbidden: You are not authorized to track this booking' });
+        return;
+      }
+
+      // Join both integer ID room and booking number room for seamless cross-client sync
+      socket.join(`booking:${booking.id}`);
+      if (booking.booking_number) {
+        socket.join(`booking:${booking.booking_number}`);
+      }
+      if (String(bookingId) !== String(booking.id) && String(bookingId) !== String(booking.booking_number)) {
+        socket.join(`booking:${bookingId}`);
+      }
+
+      if (typeof callback === 'function') {
+        callback({
+          success: true,
+          bookingId: booking.id,
+          bookingNumber: booking.booking_number,
+          status: booking.status
+        });
+      }
+    } catch (err) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Failed to join booking room' });
+    }
+  });
+
+  // Client leaves booking room
+  socket.on('leave_booking', async (bookingId) => {
+    if (bookingId) {
+      socket.leave(`booking:${bookingId}`);
+      try {
+        const booking = await findBookingHelper(bookingId);
+        if (booking) {
+          socket.leave(`booking:${booking.id}`);
+          if (booking.booking_number) {
+            socket.leave(`booking:${booking.booking_number}`);
+          }
+        }
+      } catch (_) {}
+    }
+  });
+
+  // Live GPS tracking beacon from provider (Strict validation & authorization)
+  socket.on('provider_location_update', async (data, callback) => {
+    try {
+      if (!socket.user) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Authentication required' });
+        return;
+      }
+
+      const { bookingId, latitude, longitude, lat, lng, accuracy, heading, speed } = data || {};
+      const targetBookingId = bookingId;
+      const resolvedLat = Number(latitude ?? lat);
+      const resolvedLng = Number(longitude ?? lng);
+
+      if (!targetBookingId || isNaN(resolvedLat) || isNaN(resolvedLng)) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Valid bookingId and coordinates required' });
+        return;
+      }
+
+      // Coordinate range validation: -90 to 90, -180 to 180
+      if (resolvedLat < -90 || resolvedLat > 90 || resolvedLng < -180 || resolvedLng > 180) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Coordinates out of valid range' });
+        return;
+      }
+
+      const booking = await findBookingHelper(targetBookingId);
+      if (!booking) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Booking not found' });
+        return;
+      }
+
+      const userId = socket.user.id;
+      const isAssignedProvider = booking.provider_id === userId;
+      const isAdmin = socket.user.role === 'admin';
+
+      if (!isAssignedProvider && !isAdmin) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Forbidden: Only the assigned provider can send location updates' });
+        return;
+      }
+
+      // Only allow active tracking during active booking states
+      const activeStatuses = ['accepted', 'confirmed', 'on_the_way', 'arrived', 'in_progress'];
+      if (!activeStatuses.includes(booking.status)) {
+        if (typeof callback === 'function') callback({ success: false, error: `Tracking is inactive for booking status '${booking.status}'` });
+        return;
+      }
+
+      const locPayload = {
+        bookingId: booking.id,
+        bookingNumber: booking.booking_number,
+        providerId: userId,
+        latitude: resolvedLat,
+        longitude: resolvedLng,
+        lat: resolvedLat,
+        lng: resolvedLng,
+        heading: Number(heading || 0),
+        speed: Number(speed || 0),
+        accuracy: accuracy ? Number(accuracy) : null,
+        timestamp: new Date().toISOString()
+      };
+
+      // Persist to database
+      booking.provider_location = {
+        lat: resolvedLat,
+        lng: resolvedLng,
+        heading: Number(heading || 0),
+        updatedAt: new Date()
+      };
+      await booking.save();
+
+      // Broadcast to authorized booking room (both ID and booking_number rooms)
+      // Emits both 'provider_location_update' and 'provider_location_updated' for client compatibility
+      const room1 = `booking:${booking.id}`;
+      const room2 = booking.booking_number ? `booking:${booking.booking_number}` : null;
+
+      socket.to(room1).emit('provider_location_update', locPayload);
+      socket.to(room1).emit('provider_location_updated', locPayload);
+      if (room2 && room2 !== room1) {
+        socket.to(room2).emit('provider_location_update', locPayload);
+        socket.to(room2).emit('provider_location_updated', locPayload);
+      }
+
+      if (typeof callback === 'function') callback({ success: true, location: locPayload });
+    } catch (err) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Error processing location update' });
+    }
+  });
+
+  // Real-time chat message broadcast
+  socket.on('send_booking_message', (data) => {
+    if (data && data.bookingId) {
+      socket.to(`booking:${data.bookingId}`).emit('new_booking_message', data);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[Socket.IO] Client disconnected: ${socket.id}`);
+  });
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'FixIt Local REST API is online',
+    database: isDBConnected() ? 'connected (MySQL / Sequelize)' : 'disconnected (pending MySQL configuration)',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/', (req, res) => {
+  const dbStatus = isDBConnected() ? 'Connected to MySQL (Sequelize)' : 'Waiting for MySQL connection';
+  const dbBadgeColor = isDBConnected() ? '#10b981' : '#f59e0b';
+
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <title>FixIt Local - Backend API Server (MySQL)</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background: #0b1329;
+          color: #f8fafc;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          margin: 0;
+          padding: 20px;
+          box-sizing: border-box;
+        }
+        .card {
+          background: #111d40;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 16px;
+          padding: 36px 40px;
+          max-width: 580px;
+          width: 100%;
+          box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+          text-align: center;
+        }
+        h1 { margin: 0 0 12px; font-size: 26px; color: #38bdf8; }
+        p { color: #94a3b8; font-size: 15px; line-height: 1.6; margin: 8px 0; }
+        .status-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          background: rgba(255, 255, 255, 0.06);
+          padding: 8px 16px;
+          border-radius: 9999px;
+          font-size: 14px;
+          margin: 16px 0 24px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .dot {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          background: ${dbBadgeColor};
+          box-shadow: 0 0 10px ${dbBadgeColor};
+        }
+        .btn {
+          display: inline-block;
+          background: #2563eb;
+          color: white;
+          padding: 14px 28px;
+          font-weight: 600;
+          font-size: 16px;
+          border-radius: 10px;
+          text-decoration: none;
+          margin-top: 18px;
+          transition: 0.2s;
+        }
+        .btn:hover { background: #1d4ed8; }
+        .links { margin-top: 24px; font-size: 14px; color: #64748b; }
+        .links a { color: #38bdf8; text-decoration: none; margin: 0 8px; }
+        .links a:hover { text-decoration: underline; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>FixIt Local Backend API Server</h1>
+        <p>Your Node.js, Express, MySQL & Socket.IO backend is active.</p>
+        <div class="status-badge">
+          <span class="dot"></span>
+          <span>Database: <strong>${dbStatus}</strong></span>
+        </div>
+        <div>
+          <p style="color: #cbd5e1; font-weight: 500;">To view your FixIt Local application website:</p>
+          <a href="http://localhost:5173" class="btn" target="_blank">🚀 Open FixIt Local App (Port 5173)</a>
+        </div>
+        <div class="links">
+          <span>API Health: <a href="/api/health">/api/health</a></span> |
+          <span>Services: <a href="/api/services">/api/services</a></span>
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/services', serviceRoutes);
+app.use('/api/providers', providerRoutes);
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/reviews', reviewRoutes);
+app.use('/api/complaints', complaintRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/communities', communityRoutes);
+app.use('/api/admin/communities', communityRoutes);
+app.use('/api/recently-accessed', recentlyAccessedRoutes);
+
+// 404 Route Handler
+app.use((req, res, next) => {
+  res.status(404).json({
+    success: false,
+    message: `API Route Not Found: ${req.method} ${req.originalUrl}`
+  });
+});
+
+// Global Error Handler
+app.use(errorHandler);
+
+// Start Server & Connect MySQL Database
+const PORT = process.env.PORT || 5000;
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Please terminate any running processes on port ${PORT}.`);
+  } else {
+    console.error('Server error:', err);
+  }
+});
+
+const { initAdminAccount } = require('./utils/adminInit');
+const { verifySMTPTransport } = require('./services/emailService');
+
+connectDB().then(async (db) => {
+  if (db) {
+    try {
+      await sequelize.sync();
+      console.log('[MySQL] Models synchronized with database tables.');
+      await initAdminAccount();
+    } catch (syncErr) {
+      console.error(`[MySQL] Model sync warning: ${syncErr.message || syncErr}`);
+    }
+  }
+
+  // Safe SMTP diagnostics and transporter verification on startup
+  try {
+    await verifySMTPTransport();
+  } catch (smtpErr) {
+    console.error(`[EmailService] Startup SMTP verification warning: ${smtpErr.message || smtpErr}`);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log('Socket.IO ready');
+  });
+});

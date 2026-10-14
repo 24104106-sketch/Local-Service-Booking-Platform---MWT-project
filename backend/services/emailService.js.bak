@@ -1,0 +1,158 @@
+const nodemailer = require('nodemailer');
+
+/**
+ * FixIt Local Reusable Email Service
+ * Handles SMTP transport, template rendering, and delivery for system notifications.
+ */
+
+let cachedTransporter = null;
+
+function getSmtpConfig() {
+  const host = (process.env.SMTP_HOST || '').trim();
+  const port = parseInt(process.env.SMTP_PORT || '587', 10);
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = process.env.SMTP_PASSWORD ? process.env.SMTP_PASSWORD.trim() : '';
+  const mailFrom = process.env.MAIL_FROM ? process.env.MAIL_FROM.trim() : 'FixIt Local Support <no-reply@fixitlocal.com>';
+  return { host, port, user, pass, mailFrom };
+}
+
+function getTransporter() {
+  if (cachedTransporter) return cachedTransporter;
+
+  const { host, port, user, pass } = getSmtpConfig();
+
+  if (host && user && pass) {
+    cachedTransporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465, // Port 587 uses STARTTLS (secure: false)
+      auth: { user, pass }
+    });
+    return cachedTransporter;
+  }
+
+  return null;
+}
+
+/**
+ * Safe SMTP diagnostics and connection verification.
+ * Logs host, port, user, whether password exists, and password length.
+ * NEVER prints the actual SMTP password or key.
+ * Verifies connection and authentication using transporter.verify().
+ */
+async function verifySMTPTransport() {
+  const { host, port, user, pass, mailFrom } = getSmtpConfig();
+  const hasPassword = Boolean(pass && pass.length > 0);
+  const passwordLength = pass ? pass.length : 0;
+
+  console.log('[SMTP Diagnostic] Host:', host || '(not configured)');
+  console.log(`[SMTP Diagnostic] Port: ${port} (secure: ${port === 465 ? 'true [SSL/TLS]' : 'false [STARTTLS]'})`);
+  console.log('[SMTP Diagnostic] User:', user || '(not configured)');
+  console.log('[SMTP Diagnostic] SMTP password configured:', hasPassword);
+  console.log('[SMTP Diagnostic] SMTP password length:', passwordLength);
+  console.log('[SMTP Diagnostic] Mail From:', mailFrom);
+
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn('[SMTP Diagnostic] Status: Incomplete SMTP configuration in environment. Password reset emails will run in simulated development mode.');
+    return {
+      success: false,
+      error: 'Incomplete SMTP configuration (missing SMTP_HOST, SMTP_USER, or SMTP_PASSWORD)'
+    };
+  }
+
+  try {
+    await transporter.verify();
+    console.log(`[SMTP Diagnostic] SMTP transporter verified successfully. Connected to ${host}:${port} as ${user}`);
+    return { success: true };
+  } catch (verifyErr) {
+    console.error(`[SMTP Diagnostic] SMTP transporter verification failed on ${host}:${port}:`, verifyErr.message);
+    return { success: false, error: verifyErr.message };
+  }
+}
+
+/**
+ * Send Password Reset Email with secure one-time link
+ * @param {object} options
+ * @param {string} options.toEmail Recipient email address
+ * @param {string} options.userName Recipient full name
+ * @param {string} options.resetToken One-time secure reset token
+ * @param {string} [options.resetUrl] Optional custom reset URL
+ * @param {number} [options.expiryMinutes=15] Expiry window in minutes
+ */
+async function sendPasswordResetEmail({ toEmail, userName, resetToken, resetUrl, expiryMinutes = 15 }) {
+  const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+  const targetUrl = resetUrl || `${clientUrl}/login?resetToken=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(toEmail)}`;
+  const { mailFrom } = getSmtpConfig();
+  const mailSender = mailFrom || 'FixIt Local Support <no-reply@fixitlocal.com>';
+
+  const subject = 'Reset your FixIt Local password';
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>FixIt Local Password Reset</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0b1329; color: #f8fafc; margin: 0; padding: 24px; }
+        .container { max-width: 560px; margin: 0 auto; background: #111d40; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 32px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+        .logo { font-size: 24px; font-weight: 800; color: #38bdf8; text-decoration: none; display: inline-block; margin-bottom: 20px; }
+        .logo span { color: #3b82f6; }
+        h2 { font-size: 20px; margin-top: 0; color: #ffffff; }
+        p { font-size: 14px; line-height: 1.6; color: #cbd5e1; }
+        .btn { display: inline-block; background-color: #2563eb; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 20px 0; }
+        .token-box { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; padding: 12px; font-family: monospace; font-size: 13px; color: #38bdf8; word-break: break-all; margin: 16px 0; }
+        .footer { margin-top: 30px; font-size: 12px; color: #64748b; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 16px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <a href="${clientUrl}" class="logo">FixIt <span>Local</span></a>
+        <h2>Password Reset Request</h2>
+        <p>Hello ${userName || 'Valued User'},</p>
+        <p>We received a request to reset your password for your FixIt Local account. Click the button below to set a new password:</p>
+        <div style="text-align: center;">
+          <a href="${targetUrl}" class="btn" target="_blank">Reset Password</a>
+        </div>
+        <p>Or paste this secure reset token if prompted:</p>
+        <div class="token-box">${resetToken}</div>
+        <p style="font-size: 13px; color: #94a3b8;">This reset token will expire in <strong>${expiryMinutes} minutes</strong> and can only be used once.</p>
+        <p style="font-size: 13px; color: #94a3b8;">If you did not request a password reset, you can safely ignore this email — your account remains secure.</p>
+        <div class="footer">
+          &copy; ${new Date().getFullYear()} FixIt Local Platform. Real-World Community Service Network.
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const transporter = getTransporter();
+
+  if (transporter) {
+    try {
+      const info = await transporter.sendMail({
+        from: mailSender,
+        to: toEmail,
+        subject,
+        html: htmlContent
+      });
+      console.log(`[EmailService] Password reset email sent to ${toEmail}. Message ID: ${info.messageId}`);
+      return { sent: true, provider: 'smtp', messageId: info.messageId };
+    } catch (smtpErr) {
+      console.error(`[EmailService] SMTP delivery failed to ${toEmail}:`, smtpErr.message);
+      // Return false but do not throw to protect API resilience
+      return { sent: false, error: smtpErr.message };
+    }
+  } else {
+    // When SMTP credentials are not yet configured in development .env
+    console.warn(`[EmailService] SMTP credentials not set (SMTP_HOST/SMTP_USER). To send real emails, set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD in backend/.env.`);
+    console.log(`[EmailService-Dev] Simulated email delivery to ${toEmail}. Reset URL: ${targetUrl}`);
+    return { sent: false, simulated: true };
+  }
+}
+
+module.exports = {
+  getTransporter,
+  verifySMTPTransport,
+  sendPasswordResetEmail
+};

@@ -1,0 +1,471 @@
+require('dotenv').config({ path: __dirname + '/../.env' });
+const { Op } = require('sequelize');
+const {
+  User,
+  ProviderProfile,
+  Service,
+  ProviderService,
+  Wallet,
+  WalletTransaction,
+  Notification,
+  Booking,
+  Review,
+  ChatbotHistory,
+  PasswordResetToken,
+  sequelize
+} = require('../models');
+
+async function run() {
+  try {
+    await sequelize.authenticate();
+    console.log('[Setup] Connected to database.');
+
+    // Ensure status enum in MySQL contains all needed values
+    try {
+      await sequelize.query(`
+        ALTER TABLE bookings MODIFY COLUMN status ENUM(
+          'pending',
+          'confirmed',
+          'provider_assigned',
+          'accepted',
+          'rejected',
+          'on_the_way',
+          'arrived',
+          'in_progress',
+          'completed',
+          'cancelled'
+        ) DEFAULT 'pending'
+      `);
+      console.log('[Setup] Bookings status enum verified in MySQL.');
+    } catch (err) {
+      console.warn('[Setup] Note on status enum:', err.message);
+    }
+
+    const defaultPassword = 'Password@123';
+
+    // 1. Setup Exactly 6 Canonical Services
+    const canonicalServices = [
+      {
+        title: 'AC Repair & Service',
+        category: 'AC Repair',
+        description: 'Complete indoor & outdoor unit pressure wash, filter cleaning, cooling check, and gas pressure inspection.',
+        price: 599,
+        unit: 'per AC unit',
+        duration: '45–60 min',
+        rating: 4.8,
+        reviews_count: 42,
+        icon: 'Wind',
+        featured: true,
+        tags: ['ac', 'cooling', 'cleaning', 'filter', 'gas'],
+        is_active: true
+      },
+      {
+        title: 'Deep Home Cleaning',
+        category: 'Cleaning',
+        description: 'Intensive mechanized cleaning of living spaces, bathrooms, kitchen degreasing, balconies, and floor scrubbing.',
+        price: 1999,
+        unit: 'per home (2-3 BHK)',
+        duration: '4–6 hrs',
+        rating: 4.9,
+        reviews_count: 58,
+        icon: 'Sparkles',
+        featured: true,
+        tags: ['cleaning', 'deep clean', 'home', 'kitchen', 'floor'],
+        is_active: true
+      },
+      {
+        title: 'Plumbing Fix',
+        category: 'Plumbing',
+        description: 'Inspection and repair of dripping taps, loose joints, drain clogs, flush valves, and minor pipe fitting.',
+        price: 299,
+        unit: 'per visit',
+        duration: '30–45 min',
+        rating: 4.7,
+        reviews_count: 36,
+        icon: 'Droplets',
+        featured: true,
+        tags: ['tap', 'pipe', 'leak', 'plumber', 'drain'],
+        is_active: true
+      },
+      {
+        title: 'Electrical Wiring',
+        category: 'Electrical',
+        description: 'Diagnosis and fix for tripping MCBs, faulty switches, short circuits, socket replacements, and lighting issues.',
+        price: 349,
+        unit: 'per visit',
+        duration: '1–2 hrs',
+        rating: 4.9,
+        reviews_count: 51,
+        icon: 'Zap',
+        featured: true,
+        tags: ['electrical', 'switch', 'wiring', 'mcb', 'light'],
+        is_active: true
+      },
+      {
+        title: 'Pest Control',
+        category: 'Pest Control',
+        description: 'Odorless, family-safe pest control treatments for termites, bedbugs, cockroaches, and general pests with guarantee.',
+        price: 899,
+        unit: 'per home',
+        duration: '1–2 hrs',
+        rating: 4.8,
+        reviews_count: 31,
+        icon: 'Shield',
+        featured: true,
+        tags: ['pest', 'termite', 'cockroach', 'bedbug'],
+        is_active: true
+      },
+      {
+        title: 'Carpentry Work',
+        category: 'Carpentry',
+        description: 'Precision wood carving, furniture repair, door lock installation, hinge replacement, and shelf fitting.',
+        price: 449,
+        unit: 'per visit',
+        duration: '1–2 hrs',
+        rating: 4.7,
+        reviews_count: 27,
+        icon: 'Wrench',
+        featured: true,
+        tags: ['carpentry', 'furniture', 'wood', 'door', 'lock'],
+        is_active: true
+      }
+    ];
+
+    const serviceMap = {};
+    for (const s of canonicalServices) {
+      let rec = await Service.findOne({ where: { title: s.title } });
+      if (rec) {
+        await rec.update(s);
+        console.log(`[Setup] Updated service: ${rec.title} (ID: ${rec.id}, Price: ₹${rec.price})`);
+      } else {
+        rec = await Service.create(s);
+        console.log(`[Setup] Created service: ${rec.title} (ID: ${rec.id}, Price: ₹${rec.price})`);
+      }
+      serviceMap[s.title] = rec;
+      serviceMap[s.category] = rec;
+    }
+
+    // Deactivate any non-canonical services
+    await Service.update(
+      { is_active: false },
+      { where: { title: { [Op.notIn]: canonicalServices.map(c => c.title) } } }
+    );
+
+    // 2. Setup Admin: santhiyam0603@gmail.com
+    let admin = await User.findOne({ where: { email: 'santhiyam0603@gmail.com' } });
+    if (!admin) {
+      admin = await User.create({
+        name: 'Santhiya M',
+        email: 'santhiyam0603@gmail.com',
+        password: defaultPassword,
+        role: 'admin',
+        phone: '9876543210',
+        city: 'Chennai',
+        status: 'active'
+      });
+      console.log('[Setup] Created Admin: santhiyam0603@gmail.com');
+    } else {
+      admin.name = 'Santhiya M';
+      admin.role = 'admin';
+      admin.status = 'active';
+      admin.password = defaultPassword;
+      await admin.save();
+      console.log('[Setup] Verified Admin: santhiyam0603@gmail.com');
+    }
+    await Wallet.findOrCreate({ where: { user_id: admin.id }, defaults: { balance: 1000 } });
+
+    // 3. Setup Customer: radha@gmail.com
+    let customer = await User.findOne({ where: { email: 'radha@gmail.com' } });
+    if (!customer) {
+      customer = await User.create({
+        name: 'Radha',
+        email: 'radha@gmail.com',
+        password: defaultPassword,
+        role: 'customer',
+        phone: '8123456789',
+        address: 'k.r.nagar,theni',
+        city: 'theni',
+        status: 'active'
+      });
+      console.log('[Setup] Created Customer: radha@gmail.com');
+    } else {
+      customer.name = 'Radha';
+      customer.role = 'customer';
+      customer.status = 'active';
+      customer.password = defaultPassword;
+      customer.address = 'k.r.nagar,theni';
+      customer.city = 'theni';
+      await customer.save();
+      console.log('[Setup] Verified Customer: radha@gmail.com');
+    }
+    await Wallet.findOrCreate({ where: { user_id: customer.id }, defaults: { balance: 1500 } });
+
+    // 4. Setup Exactly 6 Providers and Mappings
+    const providerConfigs = [
+      {
+        email: 'arun@gmail.com',
+        name: 'Arun Kumar',
+        phone: '9876500001',
+        businessName: 'Arun AC Care & Service',
+        category: 'AC Repair',
+        serviceTitle: 'AC Repair & Service',
+        price: 599,
+        experienceYears: 6,
+        bio: 'Certified HVAC & refrigeration technician with 6+ years of expertise in split, window, and inverter AC systems.',
+        skills: ['Split AC Repair', 'Gas Pressure Check', 'Filter Cleaning', 'Inverter AC Troubleshooting'],
+        address: '88, Usman Road, T. Nagar, Chennai',
+        city: 'Chennai',
+        lat: 13.0418,
+        lng: 80.2341
+      },
+      {
+        email: 'priya@gmail.com',
+        name: 'Priya Ramesh',
+        phone: '9876500002',
+        businessName: 'Priya Deep Home Cleaning',
+        category: 'Cleaning',
+        serviceTitle: 'Deep Home Cleaning',
+        price: 1999,
+        experienceYears: 5,
+        bio: 'Professional deep cleaning and sanitization team delivering hygienic, spotless residential spaces with eco-friendly products.',
+        skills: ['Kitchen Degreasing', 'Floor Mechanized Scrubbing', 'Bathroom Sanitization', 'Balcony Cleaning'],
+        address: '5B, Luz Church Rd, Mylapore, Chennai',
+        city: 'Chennai',
+        lat: 13.0334,
+        lng: 80.2690
+      },
+      {
+        email: 'riyas@gmail.com',
+        name: 'Riyas Mohamed',
+        phone: '9876500003',
+        businessName: 'Riyas Plumbing Solutions',
+        category: 'Plumbing',
+        serviceTitle: 'Plumbing Fix',
+        price: 299,
+        experienceYears: 7,
+        bio: 'Licensed emergency and domestic plumbing specialist for leak repairs, pipeline rerouting, and sanitary fittings.',
+        skills: ['Tap Leak Fix', 'Drain Clog Clearing', 'Flush Valve Repair', 'Concealed Pipe Inspection'],
+        address: '23, Sardar Patel Rd, Guindy, Chennai',
+        city: 'Chennai',
+        lat: 13.0067,
+        lng: 80.2206
+      },
+      {
+        email: 'yaazh@gmail.com',
+        name: 'Yaazh S',
+        phone: '9876500004',
+        businessName: 'Yaazh Electrical Works',
+        category: 'Electrical',
+        serviceTitle: 'Electrical Wiring',
+        price: 349,
+        experienceYears: 8,
+        bio: 'Experienced electrician certified in home wiring, short-circuit diagnostics, DB board repairs, and safety testing.',
+        skills: ['Switchboard Wiring', 'MCB Tripping Fix', 'Inverter Setup', 'Appliance Earthing'],
+        address: '42, 2nd Avenue, Anna Nagar, Chennai',
+        city: 'Chennai',
+        lat: 13.0850,
+        lng: 80.2100
+      },
+      {
+        email: 'deva@gmail.com',
+        name: 'Deva R',
+        phone: '9876500005',
+        businessName: 'Deva Pest Care Solutions',
+        category: 'Pest Control',
+        serviceTitle: 'Pest Control',
+        price: 899,
+        experienceYears: 8,
+        bio: 'Government-certified pest exterminator providing odorless, child-safe treatments for termites, bedbugs, and cockroaches.',
+        skills: ['Termite Drill & Inject', 'Cockroach Gel Treatment', 'Bedbug Heat & Chemical Spray', 'General Pest Control'],
+        address: '15, Velachery Main Rd, Velachery, Chennai',
+        city: 'Chennai',
+        lat: 12.9815,
+        lng: 80.2180
+      },
+      {
+        email: 'siva@gmail.com',
+        name: 'Siva K',
+        phone: '9876500006',
+        businessName: 'Siva Carpentry Works',
+        category: 'Carpentry',
+        serviceTitle: 'Carpentry Work',
+        price: 449,
+        experienceYears: 7,
+        bio: 'Master carpenter specializing in solid wood craftsmanship, furniture refurbishment, modern door lock fittings, and modular cabinetry.',
+        skills: ['Door Lock & Hinge Fitting', 'Furniture Repair', 'Modular Kitchen Cabinetry', 'Wood Varnishing & Polishing'],
+        address: '77, Adyar Bridge Rd, Adyar, Chennai',
+        city: 'Chennai',
+        lat: 13.0012,
+        lng: 80.2565
+      }
+    ];
+
+    const activeProviderProfileIds = [];
+
+    for (const p of providerConfigs) {
+      let user = await User.findOne({ where: { email: p.email } });
+      if (!user) {
+        user = await User.create({
+          name: p.name,
+          email: p.email,
+          password: defaultPassword,
+          role: 'provider',
+          phone: p.phone,
+          address: p.address,
+          city: p.city,
+          status: 'active'
+        });
+        console.log(`[Setup] Created Provider User: ${p.email}`);
+      } else {
+        user.name = p.name;
+        user.role = 'provider';
+        user.status = 'active';
+        user.password = defaultPassword;
+        user.phone = p.phone;
+        user.address = p.address;
+        user.city = p.city;
+        await user.save();
+        console.log(`[Setup] Verified Provider User: ${p.email}`);
+      }
+
+      await Wallet.findOrCreate({ where: { user_id: user.id }, defaults: { balance: 1000 } });
+
+      let profile = await ProviderProfile.findOne({ where: { user_id: user.id } });
+      const profileData = {
+        business_name: p.businessName,
+        category: p.category,
+        hourly_rate: p.price,
+        experience_years: p.experienceYears,
+        bio: p.bio,
+        skills: p.skills,
+        is_approved: true,
+        is_available: true,
+        verification_status: 'verified',
+        rating: 4.8,
+        location: {
+          lat: p.lat,
+          lng: p.lng,
+          address: p.address
+        },
+        current_location: {
+          lat: p.lat,
+          lng: p.lng,
+          heading: 0,
+          speed: 0
+        }
+      };
+
+      if (!profile) {
+        profile = await ProviderProfile.create({
+          user_id: user.id,
+          ...profileData
+        });
+        console.log(`[Setup] Created Provider Profile: ${p.businessName}`);
+      } else {
+        await profile.update(profileData);
+        console.log(`[Setup] Updated Provider Profile: ${p.businessName}`);
+      }
+
+      activeProviderProfileIds.push(profile.id);
+
+      // Link to Canonical Service in provider_services with exact price
+      const targetService = serviceMap[p.serviceTitle];
+      if (targetService) {
+        let ps = await ProviderService.findOne({
+          where: {
+            provider_profile_id: profile.id,
+            service_id: targetService.id
+          }
+        });
+        if (ps) {
+          ps.custom_price = p.price;
+          await ps.save();
+        } else {
+          await ProviderService.create({
+            provider_profile_id: profile.id,
+            service_id: targetService.id,
+            custom_price: p.price
+          });
+        }
+        console.log(`[Setup] Linked Provider "${p.businessName}" -> Service "${targetService.title}" (Price: ₹${p.price})`);
+      }
+    }
+
+    // 5. PURGE ALL OLD UNWANTED DEMO ACCOUNTS
+    const canonicalEmails = [
+      'santhiyam0603@gmail.com',
+      'radha@gmail.com',
+      'arun@gmail.com',
+      'priya@gmail.com',
+      'riyas@gmail.com',
+      'yaazh@gmail.com',
+      'deva@gmail.com',
+      'siva@gmail.com'
+    ];
+
+    const unwantedUsers = await User.findAll({
+      where: { email: { [Op.notIn]: canonicalEmails } }
+    });
+
+    console.log(`[Setup] Found ${unwantedUsers.length} unwanted demo users to remove.`);
+
+    for (const u of unwantedUsers) {
+      console.log(`[Setup] Removing demo user: ${u.email} (ID: ${u.id})`);
+      const profile = await ProviderProfile.findOne({ where: { user_id: u.id } });
+      if (profile) {
+        await ProviderService.destroy({ where: { provider_profile_id: profile.id } });
+        await profile.destroy();
+      }
+      await WalletTransaction.destroy({ where: { user_id: u.id } });
+      await Wallet.destroy({ where: { user_id: u.id } });
+      await Notification.destroy({ where: { recipient_id: u.id } });
+      await PasswordResetToken.destroy({ where: { user_id: u.id } });
+      await ChatbotHistory.destroy({ where: { user_id: u.id } });
+      await Review.destroy({ where: { [Op.or]: [{ customer_id: u.id }, { provider_id: u.id }] } });
+      await Booking.destroy({ where: { [Op.or]: [{ customer_id: u.id }, { provider_id: u.id }] } });
+      await u.destroy();
+    }
+
+    // Clean up any orphan provider profiles
+    const orphanProfiles = await ProviderProfile.findAll({
+      where: { id: { [Op.notIn]: activeProviderProfileIds } }
+    });
+    for (const op of orphanProfiles) {
+      await ProviderService.destroy({ where: { provider_profile_id: op.id } });
+      await op.destroy();
+    }
+
+    const totalUsers = await User.count();
+    const adminCount = await User.count({ where: { role: 'admin' } });
+    const customerCount = await User.count({ where: { role: 'customer' } });
+    const providerCount = await User.count({ where: { role: 'provider' } });
+    const totalServices = await Service.count({ where: { is_active: true } });
+
+    console.log(`
+==================================================================
+  [SUCCESS] EXACT 8 DEFAULT ACCOUNTS SYNCHRONIZED
+==================================================================
+  Total Users in MySQL: ${totalUsers} (Expected: 8)
+    - Admin:     ${adminCount} (santhiyam0603@gmail.com)
+    - Customer:  ${customerCount} (radha@gmail.com)
+    - Providers: ${providerCount}
+        1. arun@gmail.com  (AC Repair & Service -> ₹599)
+        2. priya@gmail.com (Deep Home Cleaning  -> ₹1,999)
+        3. riyas@gmail.com (Plumbing Fix        -> ₹299)
+        4. yaazh@gmail.com (Electrical Wiring   -> ₹349)
+        5. deva@gmail.com  (Pest Control        -> ₹899)
+        6. siva@gmail.com  (Carpentry Work      -> ₹449)
+
+  All 6 providers are ACTIVE and VERIFIED with direct service mappings!
+  Active Canonical Services: ${totalServices}
+==================================================================
+    `);
+
+    process.exit(0);
+  } catch (err) {
+    console.error('[Setup Error]:', err);
+    process.exit(1);
+  }
+}
+
+run();

@@ -1,0 +1,967 @@
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useAuth } from "../../hooks/useAuth";
+import { useAvailability } from "../../hooks/useAvailability";
+import { useToast } from "../../hooks/useToast";
+import Layout from "../../components/Layout";
+import { useTranslation } from "../../hooks/useTranslation";
+import Skeleton from "../../components/Skeleton";
+import { getCurrentCoordinates, reverseGeocode } from "../../utils/geocode";
+import { apiClient } from "../../api/apiClient";
+import { io } from "socket.io-client";
+
+const TIME_OPTIONS = [
+  "08:00 AM",
+  "08:30 AM",
+  "09:00 AM",
+  "09:30 AM",
+  "10:00 AM",
+  "10:30 AM",
+  "11:00 AM",
+  "11:30 AM",
+  "12:00 PM",
+  "12:30 PM",
+  "01:00 PM",
+  "01:30 PM",
+  "02:00 PM",
+  "02:30 PM",
+  "03:00 PM",
+  "03:30 PM",
+  "04:00 PM",
+  "04:30 PM",
+  "05:00 PM",
+  "05:30 PM",
+  "06:00 PM",
+  "06:30 PM",
+  "07:00 PM",
+  "07:30 PM",
+  "08:00 PM",
+  "08:30 PM",
+  "09:00 PM",
+];
+
+function Availability() {
+  const { t } = useTranslation();
+  const { user, updateProfile } = useAuth();
+  const { showToast } = useToast();
+  const {
+    fetchDailySchedule,
+    saveDailySchedule,
+    addBusyInterval,
+    deleteBusyInterval,
+    quickAction,
+    restoreDailySchedule,
+  } = useAvailability();
+
+  // Selected date state (defaults to today)
+  const todayStr = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }, []);
+
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+
+  // Daily Schedule state
+  const [dailyData, setDailyData] = useState(null);
+  const [loadingSchedule, setLoadingSchedule] = useState(true);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+
+  // Working hours form inputs
+  const [workStart, setWorkStart] = useState("09:00 AM");
+  const [workEnd, setWorkEnd] = useState("06:00 PM");
+
+  // New busy interval form inputs
+  const [showAddInterval, setShowAddInterval] = useState(false);
+  const [newIntervalStart, setNewIntervalStart] = useState("01:00 PM");
+  const [newIntervalEnd, setNewIntervalEnd] = useState("02:00 PM");
+  const [newIntervalReason, setNewIntervalReason] = useState("");
+  const [intervalSubmitting, setIntervalSubmitting] = useState(false);
+
+  // Conflict modal state
+  const [conflictWarning, setConflictWarning] = useState(null); // { message, conflictingBookings }
+
+  // GPS Location broadcasting state
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [lastBroadcast, setLastBroadcast] = useState(null);
+  const [isWatchingLocation, setIsWatchingLocation] = useState(false);
+  const watchIdRef = useRef(null);
+
+  const isOnline = (user?.availabilityStatus ?? "ONLINE") !== "OFFLINE";
+
+  const toggleOnline = () => {
+    updateProfile({ availabilityStatus: isOnline ? "OFFLINE" : "ONLINE" });
+  };
+
+  // Load daily schedule for selected date
+  const loadScheduleForDate = useCallback(
+    async (date) => {
+      setLoadingSchedule(true);
+      try {
+        const data = await fetchDailySchedule(date);
+        setDailyData(data);
+        if (data.startTime) setWorkStart(data.startTime);
+        if (data.endTime) setWorkEnd(data.endTime);
+      } catch (err) {
+        console.error("Failed to load daily schedule:", err);
+        showToast("Could not retrieve daily schedule from server.", "error");
+      } finally {
+        setLoadingSchedule(false);
+      }
+    },
+    [fetchDailySchedule, showToast]
+  );
+
+  useEffect(() => {
+    if (selectedDate) {
+      loadScheduleForDate(selectedDate);
+    }
+  }, [selectedDate, loadScheduleForDate]);
+
+  // Real-time Socket.IO synchronization for availability changes
+  useEffect(() => {
+    const socketUrl =
+      import.meta.env.VITE_SOCKET_URL ||
+      (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "") : "") ||
+      (import.meta.env.VITE_API_BASE_URL ? import.meta.env.VITE_API_BASE_URL.replace(/\/api\/?$/, "") : "") ||
+      "http://localhost:5000";
+    const socket = io(socketUrl, {
+      transports: ["websocket", "polling"],
+      withCredentials: true,
+    });
+
+    socket.on("provider_availability_updated", (payload) => {
+      if (!payload || payload.providerId === user?.id || payload.providerId === user?._id) {
+        if (!payload.date || payload.date === selectedDate) {
+          loadScheduleForDate(selectedDate);
+        }
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [user?.id, user?._id, selectedDate, loadScheduleForDate]);
+
+  // Broadcast provider's real GPS coordinates
+  const broadcastLocation = async (coords) => {
+    try {
+      const response = await apiClient.post("/providers/location", {
+        lat: coords.latitude,
+        lng: coords.longitude,
+        accuracy: coords.accuracy || null,
+        heading: coords.heading || 0,
+      });
+
+      let address = coords.address || "";
+      if (!address) {
+        try {
+          address = await reverseGeocode(coords.latitude, coords.longitude);
+        } catch {
+          address = `${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}`;
+        }
+      }
+
+      setLastBroadcast({
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy,
+        address,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      });
+
+      return response;
+    } catch (err) {
+      console.error("Failed to broadcast provider location:", err);
+      throw err;
+    }
+  };
+
+  const handleManualBroadcast = async () => {
+    setGpsLoading(true);
+    try {
+      const coords = await getCurrentCoordinates();
+      await broadcastLocation(coords);
+      showToast("Live GPS coordinates broadcasted successfully!", "success");
+    } catch (err) {
+      showToast(err.message || "Failed to retrieve or broadcast GPS.", "error");
+    } finally {
+      setGpsLoading(false);
+    }
+  };
+
+  const toggleWatchLocation = () => {
+    if (isWatchingLocation) {
+      if (watchIdRef.current !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+      setIsWatchingLocation(false);
+      showToast("Continuous location broadcasting stopped.", "info");
+    } else {
+      if (!navigator.geolocation) {
+        showToast("Geolocation is not supported by your browser.", "error");
+        return;
+      }
+      const id = navigator.geolocation.watchPosition(
+        async (position) => {
+          try {
+            await broadcastLocation({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy,
+              heading: position.coords.heading,
+            });
+          } catch {
+            // Ignore intermittent errors
+          }
+        },
+        (err) => {
+          showToast(`Location tracking error: ${err.message}`, "error");
+          setIsWatchingLocation(false);
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
+      );
+      watchIdRef.current = id;
+      setIsWatchingLocation(true);
+      showToast("Live GPS tracking started — broadcasting location updates.", "success");
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (watchIdRef.current !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+    };
+  }, []);
+
+  // Save Working Hours Handler
+  const handleSaveWorkingHours = async () => {
+    setSavingSchedule(true);
+    setConflictWarning(null);
+    try {
+      await saveDailySchedule({
+        date: selectedDate,
+        startTime: workStart,
+        endTime: workEnd,
+        isAvailable: dailyData?.isAvailable !== false,
+        isDayOff: dailyData?.isDayOff === true,
+        busyIntervals: dailyData?.busyIntervals || [],
+      });
+      showToast(`Working hours for ${selectedDate} saved (${workStart} – ${workEnd})`, "success");
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.conflictingBookings) {
+        setConflictWarning({
+          message: err.response.data.message,
+          conflictingBookings: err.response.data.conflictingBookings,
+        });
+      } else {
+        showToast(err.response?.data?.message || err.message || "Failed to save working hours.", "error");
+      }
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  // Toggle Day Off Handler
+  const handleToggleDayOff = async () => {
+    setSavingSchedule(true);
+    setConflictWarning(null);
+    const willBeDayOff = !dailyData?.isDayOff;
+    try {
+      if (willBeDayOff) {
+        await quickAction({ action: "mark_day_off", date: selectedDate });
+        showToast(`Date ${selectedDate} marked as Day Off.`, "info");
+      } else {
+        await quickAction({ action: "mark_day_available", date: selectedDate });
+        showToast(`Date ${selectedDate} marked Available.`, "success");
+      }
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.conflictingBookings) {
+        setConflictWarning({
+          message: err.response.data.message,
+          conflictingBookings: err.response.data.conflictingBookings,
+        });
+      } else {
+        showToast(err.response?.data?.message || err.message || "Failed to update day off status.", "error");
+      }
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  // Quick Action: Rest of Today Unavailable
+  const handleRestOfTodayUnavailable = async () => {
+    setSavingSchedule(true);
+    setConflictWarning(null);
+    try {
+      await quickAction({ action: "unavailable_rest_of_today", date: todayStr });
+      showToast("Remaining part of today marked unavailable for new bookings.", "success");
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.conflictingBookings) {
+        setConflictWarning({
+          message: err.response.data.message,
+          conflictingBookings: err.response.data.conflictingBookings,
+        });
+      } else {
+        showToast(err.response?.data?.message || err.message || "Failed to mark rest of today unavailable.", "error");
+      }
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  // Quick Action: Restore default weekly schedule
+  const handleRestoreDefaultSchedule = async () => {
+    if (!window.confirm(`Restore default weekly schedule for ${selectedDate}? Any date-specific hours and busy intervals will be reset.`)) {
+      return;
+    }
+    setSavingSchedule(true);
+    try {
+      await restoreDailySchedule(selectedDate);
+      showToast(`Default weekly schedule restored for ${selectedDate}.`, "success");
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      showToast(err.response?.data?.message || err.message || "Failed to restore default schedule.", "error");
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  // Add Busy Interval Handler
+  const handleAddBusyInterval = async (e) => {
+    e.preventDefault();
+    setIntervalSubmitting(true);
+    setConflictWarning(null);
+    try {
+      await addBusyInterval({
+        date: selectedDate,
+        startTime: newIntervalStart,
+        endTime: newIntervalEnd,
+        reason: newIntervalReason,
+      });
+      showToast(`Busy interval added (${newIntervalStart} – ${newIntervalEnd}).`, "success");
+      setShowAddInterval(false);
+      setNewIntervalReason("");
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.conflictingBookings) {
+        setConflictWarning({
+          message: err.response.data.message,
+          conflictingBookings: err.response.data.conflictingBookings,
+        });
+      } else {
+        showToast(err.response?.data?.message || err.message || "Failed to add busy interval.", "error");
+      }
+    } finally {
+      setIntervalSubmitting(false);
+    }
+  };
+
+  // Delete Busy Interval Handler
+  const handleDeleteBusyInterval = async (intervalId) => {
+    try {
+      await deleteBusyInterval(intervalId, selectedDate);
+      showToast("Busy interval removed.", "info");
+      await loadScheduleForDate(selectedDate);
+    } catch (err) {
+      showToast(err.response?.data?.message || err.message || "Failed to delete busy interval.", "error");
+    }
+  };
+
+  // Format date display label
+  const formattedDateLabel = useMemo(() => {
+    if (!selectedDate) return "";
+    const [y, m, d] = selectedDate.split("-").map(Number);
+    const dateObj = new Date(y, m - 1, d);
+    return dateObj.toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  }, [selectedDate]);
+
+  return (
+    <Layout title={t("availability")}>
+      {/* 1. Accepting Bookings Card */}
+      <div
+        className="stat-card"
+        style={{
+          marginBottom: 20,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 12,
+        }}
+      >
+        <div>
+          <h3 style={{ margin: 0 }}>Accepting New Bookings</h3>
+          <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 12 }}>
+            Toggle off if you're fully booked or on extended leave — customers won't be able to book you while offline.
+          </p>
+        </div>
+        <button
+          type="button"
+          className={`btn ${isOnline ? "btn-primary" : ""}`}
+          onClick={toggleOnline}
+          aria-label="Toggle Online/Offline Status"
+        >
+          {isOnline ? "🟢 Online" : "⚪ Offline"}
+        </button>
+      </div>
+
+      {/* 2. Real-Time Provider GPS Location Card (Preserved from existing feature) */}
+      <div
+        className="stat-card"
+        style={{
+          marginBottom: 24,
+          background: "linear-gradient(135deg, rgba(30, 58, 138, 0.2) 0%, rgba(15, 23, 42, 0.6) 100%)",
+          border: "1px solid rgba(59, 130, 246, 0.3)",
+          borderRadius: "12px",
+          padding: "20px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <h3 style={{ margin: 0, fontSize: 16, color: "#93c5fd" }}>📍 Provider Live GPS Location</h3>
+              <span
+                style={{
+                  fontSize: 11,
+                  padding: "2px 8px",
+                  borderRadius: 9999,
+                  background: isWatchingLocation ? "rgba(34, 197, 94, 0.2)" : "rgba(148, 163, 184, 0.2)",
+                  color: isWatchingLocation ? "#4ade80" : "#94a3b8",
+                  border: isWatchingLocation ? "1px solid rgba(34, 197, 94, 0.4)" : "1px solid rgba(148, 163, 184, 0.3)",
+                }}
+              >
+                {isWatchingLocation ? "● Continuous Live Tracking Active" : "○ Static / Manual"}
+              </span>
+            </div>
+            <p style={{ margin: 0, color: "var(--muted, #94a3b8)", fontSize: 13, lineHeight: 1.5 }}>
+              Customers see your real-time GPS coordinates and turn-by-turn route when you are on the way to an active job.
+            </p>
+
+            {lastBroadcast && (
+              <div
+                style={{
+                  marginTop: 14,
+                  padding: "10px 14px",
+                  background: "rgba(15, 23, 42, 0.7)",
+                  borderRadius: "8px",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 4 }}>
+                  <span>
+                    <strong>GPS:</strong> {lastBroadcast.latitude.toFixed(5)}, {lastBroadcast.longitude.toFixed(5)}
+                  </span>
+                  {lastBroadcast.accuracy && <span><strong>Accuracy:</strong> ±{Math.round(lastBroadcast.accuracy)}m</span>}
+                  <span><strong>Updated:</strong> {lastBroadcast.time}</span>
+                </div>
+                {lastBroadcast.address && (
+                  <div style={{ color: "#93c5fd", marginTop: 2 }}>
+                    <strong>Detected Address:</strong> {lastBroadcast.address}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={gpsLoading}
+              onClick={handleManualBroadcast}
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              {gpsLoading ? "📡 Capturing GPS..." : "📍 Broadcast Current GPS"}
+            </button>
+            <button
+              type="button"
+              className={`btn ${isWatchingLocation ? "btn-danger" : "btn-primary"}`}
+              onClick={toggleWatchLocation}
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              {isWatchingLocation ? "⏹ Stop Live Stream" : "📡 Start Continuous Stream"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Conflict Warning Alert (Protects confirmed bookings) */}
+      {conflictWarning && (
+        <div
+          role="alert"
+          style={{
+            marginBottom: 20,
+            background: "rgba(239, 68, 68, 0.15)",
+            border: "1px solid #ef4444",
+            borderRadius: "10px",
+            padding: "16px 20px",
+            color: "#fca5a5",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <strong style={{ color: "#f87171", fontSize: 15, display: "flex", alignItems: "center", gap: 6 }}>
+                ⚠️ Booking Conflict Warning
+              </strong>
+              <p style={{ margin: "6px 0 10px", fontSize: 13.5, color: "#fecaca", lineHeight: 1.5 }}>
+                {conflictWarning.message}
+              </p>
+              <div style={{ background: "rgba(0, 0, 0, 0.3)", borderRadius: "8px", padding: "10px 14px", fontSize: 13 }}>
+                <strong>Conflicting Confirmed Bookings:</strong>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                  {conflictWarning.conflictingBookings?.map((bk) => (
+                    <li key={bk.id || bk.bookingNumber}>
+                      <strong>#{bk.bookingNumber}</strong> — {bk.serviceTitle} at <strong>{bk.time}</strong> ({bk.status})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p style={{ margin: "10px 0 0", fontSize: 12, color: "#fda4af" }}>
+                Confirmed bookings are protected and will never be cancelled automatically. Please resolve the booking through the standard rescheduling or cancellation workflow first.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => setConflictWarning(null)}
+              style={{ color: "#fca5a5", fontSize: 18, lineHeight: 1 }}
+              aria-label="Close warning"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Date Picker & Quick Actions Header */}
+      <div
+        className="stat-card"
+        style={{
+          marginBottom: 20,
+          background: "var(--card, #1e293b)",
+          border: "1px solid var(--border, #334155)",
+          borderRadius: "12px",
+          padding: "18px 20px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+          <div>
+            <span style={{ fontSize: 12, color: "var(--muted, #94a3b8)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Select Schedule Date
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 4 }}>
+              <input
+                type="date"
+                id="availability-date-picker"
+                value={selectedDate}
+                min={todayStr}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-strong, #475569)",
+                  background: "var(--bg-input, #0f172a)",
+                  color: "var(--ink, #f8fafc)",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              />
+              <span
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: 9999,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: dailyData?.isDayOff ? "rgba(239, 68, 68, 0.2)" : "rgba(34, 197, 94, 0.2)",
+                  color: dailyData?.isDayOff ? "#f87171" : "#4ade80",
+                  border: dailyData?.isDayOff ? "1px solid rgba(239, 68, 68, 0.4)" : "1px solid rgba(34, 197, 94, 0.4)",
+                }}
+              >
+                {dailyData?.isDayOff ? "🔴 Day Off" : "🟢 Available"}
+              </span>
+              {dailyData?.isCustomized && (
+                <span
+                  style={{
+                    padding: "4px 10px",
+                    borderRadius: 9999,
+                    fontSize: 11,
+                    background: "rgba(59, 130, 246, 0.2)",
+                    color: "#60a5fa",
+                    border: "1px solid rgba(59, 130, 246, 0.4)",
+                  }}
+                >
+                  Override Active
+                </span>
+              )}
+            </div>
+            <p style={{ margin: "4px 0 0", color: "#93c5fd", fontSize: 13, fontWeight: 500 }}>
+              {formattedDateLabel}
+            </p>
+          </div>
+
+          {/* Quick Actions Buttons */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {selectedDate === todayStr && (
+              <button
+                type="button"
+                id="btn-rest-of-today"
+                className="btn btn-warning btn-sm"
+                onClick={handleRestOfTodayUnavailable}
+                disabled={savingSchedule}
+                title="Mark remainder of today unavailable"
+              >
+                ⚡ Rest of Today Unavailable
+              </button>
+            )}
+
+            <button
+              type="button"
+              id="btn-toggle-day-off"
+              className={`btn btn-sm ${dailyData?.isDayOff ? "btn-primary" : "btn-secondary"}`}
+              onClick={handleToggleDayOff}
+              disabled={savingSchedule}
+            >
+              {dailyData?.isDayOff ? "🔄 Set as Available" : "🏖️ Mark as Day Off"}
+            </button>
+
+            {dailyData?.isCustomized && (
+              <button
+                type="button"
+                id="btn-restore-schedule"
+                className="btn btn-ghost btn-sm"
+                onClick={handleRestoreDefaultSchedule}
+                disabled={savingSchedule}
+                title="Reset this day back to default weekly working hours"
+              >
+                ↩️ Restore Default
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {loadingSchedule ? (
+        <Skeleton variant="table" count={3} height={100} />
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 20 }}>
+          {/* 5. Working Hours Configuration Card */}
+          <div
+            className="stat-card"
+            style={{
+              background: "var(--card, #1e293b)",
+              border: "1px solid var(--border, #334155)",
+              borderRadius: "12px",
+              padding: "20px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <h3 style={{ margin: 0, fontSize: 16 }}>⏰ Working Hours for this Date</h3>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                {dailyData?.isCustomized ? "Date-specific override" : "Default weekly hours"}
+              </span>
+            </div>
+
+            {dailyData?.isDayOff ? (
+              <div
+                style={{
+                  padding: "16px",
+                  borderRadius: "8px",
+                  background: "rgba(239, 68, 68, 0.1)",
+                  border: "1px solid rgba(239, 68, 68, 0.2)",
+                  color: "#fca5a5",
+                  fontSize: 13.5,
+                  marginBottom: 16,
+                }}
+              >
+                <strong>This date is marked as a Day Off.</strong>
+                <p style={{ margin: "4px 0 0", fontSize: 12.5, color: "#fecaca" }}>
+                  Customers cannot book any slots on this day. Click "Set as Available" above if you wish to accept jobs.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <p style={{ margin: "0 0 16px", color: "var(--muted)", fontSize: 12.5 }}>
+                  Set the hours you are open for customer appointments on this date.
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>Start Time</label>
+                    <select
+                      id="work-start-time-select"
+                      value={workStart}
+                      onChange={(e) => setWorkStart(e.target.value)}
+                      style={{ width: "100%", padding: "8px", borderRadius: "6px" }}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={`start-${t}`} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>End Time</label>
+                    <select
+                      id="work-end-time-select"
+                      value={workEnd}
+                      onChange={(e) => setWorkEnd(e.target.value)}
+                      style={{ width: "100%", padding: "8px", borderRadius: "6px" }}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={`end-${t}`} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  id="btn-save-working-hours"
+                  className="btn btn-primary"
+                  onClick={handleSaveWorkingHours}
+                  disabled={savingSchedule}
+                  style={{ width: "100%" }}
+                >
+                  {savingSchedule ? "Saving Schedule..." : "💾 Save Working Hours for This Date"}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* 6. Busy Intervals & Breaks Card */}
+          <div
+            className="stat-card"
+            style={{
+              background: "var(--card, #1e293b)",
+              border: "1px solid var(--border, #334155)",
+              borderRadius: "12px",
+              padding: "20px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <h3 style={{ margin: 0, fontSize: 16 }}>☕ Busy Intervals & Blocked Periods</h3>
+              <button
+                type="button"
+                id="btn-toggle-add-interval"
+                className="btn btn-sm btn-secondary"
+                onClick={() => setShowAddInterval(!showAddInterval)}
+              >
+                {showAddInterval ? "Cancel" : "+ Add Block / Break"}
+              </button>
+            </div>
+
+            <p style={{ margin: "0 0 14px", color: "var(--muted)", fontSize: 12.5 }}>
+              Add lunch breaks, errands, or personal blocks. Customers cannot book slots that overlap with these intervals. Private reasons are never shown to customers.
+            </p>
+
+            {/* Add Interval Form */}
+            {showAddInterval && (
+              <form
+                onSubmit={handleAddBusyInterval}
+                style={{
+                  background: "rgba(15, 23, 42, 0.7)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "8px",
+                  padding: "14px",
+                  marginBottom: 16,
+                }}
+              >
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label style={{ fontSize: 11.5 }}>Block Start</label>
+                    <select
+                      id="busy-start-select"
+                      value={newIntervalStart}
+                      onChange={(e) => setNewIntervalStart(e.target.value)}
+                      style={{ width: "100%", padding: "6px" }}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={`bstart-${t}`} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label style={{ fontSize: 11.5 }}>Block End</label>
+                    <select
+                      id="busy-end-select"
+                      value={newIntervalEnd}
+                      onChange={(e) => setNewIntervalEnd(e.target.value)}
+                      style={{ width: "100%", padding: "6px" }}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={`bend-${t}`} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="field" style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 11.5 }}>Private Reason (Optional)</label>
+                  <input
+                    type="text"
+                    id="busy-reason-input"
+                    value={newIntervalReason}
+                    onChange={(e) => setNewIntervalReason(e.target.value)}
+                    placeholder="e.g. Lunch break, Dentist, Travel"
+                    style={{ width: "100%", padding: "6px 10px", fontSize: 13 }}
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  id="btn-submit-interval"
+                  className="btn btn-primary btn-sm"
+                  disabled={intervalSubmitting}
+                  style={{ width: "100%" }}
+                >
+                  {intervalSubmitting ? "Adding Block..." : "✓ Confirm Blocked Period"}
+                </button>
+              </form>
+            )}
+
+            {/* List of busy intervals */}
+            {(!dailyData?.busyIntervals || dailyData.busyIntervals.length === 0) ? (
+              <div
+                style={{
+                  padding: "20px",
+                  textAlign: "center",
+                  background: "rgba(255, 255, 255, 0.02)",
+                  borderRadius: "8px",
+                  color: "var(--faint, #64748b)",
+                  fontSize: 13,
+                }}
+              >
+                No busy intervals blocked on this date.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {dailyData.busyIntervals.map((interval) => (
+                  <div
+                    key={interval.id || `${interval.start}-${interval.end}`}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "10px 14px",
+                      background: "rgba(245, 158, 11, 0.1)",
+                      border: "1px solid rgba(245, 158, 11, 0.3)",
+                      borderRadius: "8px",
+                    }}
+                  >
+                    <div>
+                      <strong style={{ color: "#fbbf24", fontSize: 13.5 }}>
+                        {interval.start} – {interval.end}
+                      </strong>
+                      {interval.reason && (
+                        <span style={{ marginLeft: 8, fontSize: 12, color: "var(--muted)" }}>
+                          ({interval.reason})
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteBusyInterval(interval.id)}
+                      className="btn btn-ghost btn-sm"
+                      style={{ color: "#f87171", padding: "2px 8px" }}
+                      aria-label={`Remove busy interval ${interval.start} to ${interval.end}`}
+                    >
+                      🗑️ Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 7. Confirmed Customer Bookings for this Date */}
+      <div
+        className="stat-card"
+        style={{
+          marginTop: 20,
+          background: "var(--card, #1e293b)",
+          border: "1px solid var(--border, #334155)",
+          borderRadius: "12px",
+          padding: "20px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0, fontSize: 16 }}>📋 Existing Bookings on {formattedDateLabel}</h3>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+            {dailyData?.bookings?.length || 0} booking(s) scheduled
+          </span>
+        </div>
+
+        {(!dailyData?.bookings || dailyData.bookings.length === 0) ? (
+          <p style={{ color: "var(--faint, #64748b)", fontSize: 13, margin: 0 }}>
+            No customer bookings scheduled for this date.
+          </p>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {dailyData.bookings.map((b) => (
+              <div
+                key={b.id || b.bookingNumber}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 12,
+                  padding: "12px 16px",
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: "8px",
+                }}
+              >
+                <div>
+                  <strong style={{ fontSize: 14 }}>#{b.bookingNumber}</strong>
+                  <span style={{ margin: "0 8px", color: "var(--muted)" }}>•</span>
+                  <span>{b.serviceTitle}</span>
+                  <span style={{ margin: "0 8px", color: "var(--muted)" }}>•</span>
+                  <span style={{ color: "var(--muted)", fontSize: 12 }}>Customer: {b.customerName}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="badge active" style={{ fontSize: 12, fontWeight: 700 }}>
+                    🕐 {b.time}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 9999,
+                      background: "rgba(59, 130, 246, 0.2)",
+                      color: "#93c5fd",
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {b.status}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Layout>
+  );
+}
+
+export default Availability;

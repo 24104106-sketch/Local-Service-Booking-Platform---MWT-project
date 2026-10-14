@@ -1,0 +1,124 @@
+// FixIt Local REST API Client
+// Connects the React frontend to the Node.js / Express backend
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+
+export const getAuthToken = () => {
+  return (
+    localStorage.getItem('fixit_token') ||
+    localStorage.getItem('token') ||
+    localStorage.getItem('fixit_local_auth_token') ||
+    sessionStorage.getItem('fixit_token') ||
+    sessionStorage.getItem('token') ||
+    null
+  );
+};
+
+// Helper to save auth token
+export const setAuthToken = (token) => {
+  if (token) {
+    localStorage.setItem('fixit_token', token);
+  } else {
+    localStorage.removeItem('fixit_token');
+  }
+};
+
+// Generic HTTP request wrapper
+async function request(endpoint, options = {}) {
+  const url = `${API_BASE_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+  const token = getAuthToken();
+
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...options.headers
+  };
+
+  const config = {
+    ...options,
+    headers
+  };
+
+  try {
+    const response = await fetch(url, config);
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const errorMsg =
+        data.message ||
+        data.error ||
+        (response.status === 404
+          ? 'Resource not found'
+          : response.status === 401
+          ? 'Authentication required or session expired'
+          : response.status === 403
+          ? 'Access denied'
+          : `Request failed with status ${response.status}`);
+      const err = new Error(errorMsg);
+      err.response = { status: response.status, data };
+      err.status = response.status;
+      err.data = data;
+      throw err;
+    }
+
+    return data;
+  } catch (error) {
+    if (!error.response && error.name === 'TypeError' && error.message?.includes('fetch')) {
+      error.message = 'Backend server is unavailable or connection was refused.';
+    }
+    throw error;
+  }
+}
+
+// REST methods
+export const apiClient = {
+  get: (endpoint, queryParams = {}) => {
+    // Support both direct params { lat, lng } and axios-style options { params: { lat, lng } }
+    const rawParams =
+      queryParams && typeof queryParams === 'object' && queryParams.params && typeof queryParams.params === 'object'
+        ? queryParams.params
+        : queryParams;
+
+    const searchParams = new URLSearchParams();
+    Object.entries(rawParams || {}).forEach(([key, val]) => {
+      if (val !== undefined && val !== null && val !== '') {
+        searchParams.append(key, val);
+      }
+    });
+    const qs = searchParams.toString();
+    return request(`${endpoint}${qs ? `?${qs}` : ''}`, { method: 'GET' });
+  },
+
+  post: (endpoint, body = {}) => {
+    return request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+  },
+
+  put: (endpoint, body = {}) => {
+    return request(endpoint, {
+      method: 'PUT',
+      body: JSON.stringify(body)
+    });
+  },
+
+  delete: (endpoint) => {
+    return request(endpoint, { method: 'DELETE' });
+  },
+
+  // Health check helper
+  checkHealth: async () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1200);
+      const res = await fetch(`${API_BASE_URL}/health`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+};
+
+export default apiClient;

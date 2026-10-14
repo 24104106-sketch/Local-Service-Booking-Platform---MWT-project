@@ -1,0 +1,119 @@
+const { Sequelize } = require('sequelize');
+const mysql = require('mysql2/promise');
+
+const DB_HOST = process.env.DB_HOST || 'localhost';
+const DB_PORT = parseInt(process.env.DB_PORT || '3306', 10);
+const DB_NAME = process.env.DB_NAME || 'fixit_local';
+const DB_USER = process.env.DB_USER || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || process.env.DB_PASS || '';
+
+let isConnected = false;
+
+// Create Sequelize instance
+const sequelize = new Sequelize(DB_NAME, DB_USER, DB_PASSWORD, {
+  host: DB_HOST,
+  port: DB_PORT,
+  dialect: 'mysql',
+  logging: false,
+  pool: {
+    max: 10,
+    min: 0,
+    acquire: 30000,
+    idle: 10000
+  },
+  define: {
+    timestamps: true,
+    underscored: true
+  }
+});
+
+const formatError = (error) => {
+  if (!error) return 'Unknown error';
+  if (error.message && error.message.trim()) return error.message;
+  if (error.code) return `Error code: ${error.code}`;
+  if (error.errors && Array.isArray(error.errors) && error.errors.length > 0) {
+    return error.errors.map(e => e.message || e.code || String(e)).join('; ');
+  }
+  return String(error);
+};
+
+const { spawn } = require('child_process');
+const fs = require('fs');
+
+const tryAutoStartLocalMySQL = async () => {
+  const xamppMysqld = 'C:\\xampp\\mysql\\bin\\mysqld.exe';
+  const xamppIni = 'C:\\xampp\\mysql\\bin\\my.ini';
+  if (process.platform === 'win32' && fs.existsSync(xamppMysqld)) {
+    console.log('[MySQL] Port 3306 unreachable. Auto-launching local XAMPP MySQL daemon...');
+    try {
+      const child = spawn(xamppMysqld, [`--defaults-file=${xamppIni}`, '--standalone'], {
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+      // Wait for MySQL to initialize socket and accept connections
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return true;
+    } catch (e) {
+      console.warn('[MySQL] Auto-start attempt error:', e.message);
+    }
+  }
+  return false;
+};
+
+/**
+ * Ensure database exists on MySQL server before connecting Sequelize
+ */
+const ensureDatabaseExists = async () => {
+  try {
+    const connection = await mysql.createConnection({
+      host: DB_HOST,
+      port: DB_PORT,
+      user: DB_USER,
+      password: DB_PASSWORD
+    });
+
+    await connection.query(
+      `CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+    );
+    await connection.end();
+  } catch (error) {
+    if (error.message && !error.message.includes('ECONNREFUSED')) {
+      console.error(`[MySQL Setup Error]: Failed to ensure database exists: ${formatError(error)}`);
+    }
+    throw error;
+  }
+};
+
+/**
+ * Connect to MySQL using Sequelize with automatic retry/start
+ */
+const connectDB = async (retry = true) => {
+  try {
+    await ensureDatabaseExists();
+    await sequelize.authenticate();
+    isConnected = true;
+    console.log(`[MySQL] Connected successfully to database: ${DB_NAME} on ${DB_HOST}:${DB_PORT}`);
+    return sequelize;
+  } catch (error) {
+    if (retry && error.message && (error.message.includes('ECONNREFUSED') || error.code === 'ECONNREFUSED')) {
+      const started = await tryAutoStartLocalMySQL();
+      if (started) {
+        return connectDB(false);
+      }
+    }
+    isConnected = false;
+    console.error(`[MySQL] Connection Failed: ${formatError(error)}`);
+    console.warn('Please verify DB_HOST, DB_PORT, DB_NAME, DB_USER, and DB_PASSWORD in backend/.env');
+    console.warn('Make sure MySQL is running (e.g. open XAMPP Control Panel and start MySQL, or run npm run mysql:start).');
+    return null;
+  }
+};
+
+const isDBConnected = () => isConnected;
+
+module.exports = {
+  sequelize,
+  connectDB,
+  isDBConnected
+};

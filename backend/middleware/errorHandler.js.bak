@@ -1,0 +1,42 @@
+const { sendError } = require('../utils/response');
+
+const errorHandler = (err, req, res, next) => {
+  console.error('[Error Details]:', err);
+
+  // Sequelize validation error
+  if (err.name === 'SequelizeValidationError') {
+    const messages = err.errors.map(e => e.message);
+    return sendError(res, 'Validation failed: ' + messages.join(', '), 400, messages);
+  }
+
+  // Sequelize unique constraint error
+  if (err.name === 'SequelizeUniqueConstraintError') {
+    const field = err.errors && err.errors[0] ? err.errors[0].path : 'field';
+    return sendError(res, `A record with this ${field} already exists.`, 400);
+  }
+
+  // Sequelize foreign key constraint error
+  if (err.name === 'SequelizeForeignKeyConstraintError') {
+    return sendError(res, 'Referenced related record does not exist.', 400);
+  }
+
+  // JWT errors
+  if (err.name === 'JsonWebTokenError') {
+    return sendError(res, 'Invalid authentication token', 401);
+  }
+  if (err.name === 'TokenExpiredError') {
+    return sendError(res, 'Authentication token has expired', 401);
+  }
+
+  // Sequelize connection error
+  if (err.name === 'SequelizeConnectionError' || err.name === 'SequelizeConnectionRefusedError') {
+    return sendError(res, 'Database connection is not established. Please check MySQL configuration in backend/.env', 503);
+  }
+
+  const statusCode = err.statusCode || 500;
+  const message = err.message || 'Internal server error';
+
+  return sendError(res, message, statusCode);
+};
+
+module.exports = errorHandler;

@@ -1,0 +1,75 @@
+<svg width="100%" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Illustration of a friendly handyman with a toolbox standing beside a house</title>
+
+  <ellipse cx="200" cy="352" rx="150" ry="14" fill="#0f1830"/>
+
+  <circle cx="70" cy="70" r="26" fill="#1c2842"/>
+  <circle cx="330" cy="55" r="18" fill="#1c2842"/>
+  <circle cx="120" cy="40" r="14" fill="#1c2842"/>
+
+  <g>
+    <circle cx="200" cy="60" r="34" fill="#fbbf24"/>
+    <g stroke="#fbbf24" stroke-width="4" stroke-linecap="round">
+      <line x1="200" y1="8" x2="200" y2="0"/>
+      <line x1="246" y1="34" x2="253" y2="28"/>
+      <line x1="154" y1="34" x2="147" y2="28"/>
+    </g>
+  </g>
+
+  <g>
+    <polygon points="90,340 90,190 200,120 310,190 310,340" fill="#e2e8f0"/>
+    <polygon points="70,200 200,110 330,200 310,190 200,120 90,190" fill="#60a5fa"/>
+    <rect x="118" y="230" width="60" height="60" rx="4" fill="#93c5fd"/>
+    <line x1="148" y1="230" x2="148" y2="290" stroke="#1c2842" stroke-width="3"/>
+    <line x1="118" y1="260" x2="178" y2="260" stroke="#1c2842" stroke-width="3"/>
+    <rect x="222" y="260" width="46" height="80" rx="3" fill="#2563eb"/>
+    <circle cx="258" cy="300" r="3.5" fill="#e2e8f0"/>
+    <rect x="90" y="332" width="220" height="10" fill="#cbd5e1"/>
+  </g>
+
+  <g transform="translate(300,150)">
+    <rect x="-3" y="0" width="6" height="46" rx="3" fill="#93c5fd"/>
+    <rect x="-16" y="-16" width="32" height="20" rx="6" fill="#93c5fd"/>
+  </g>
+  <g transform="translate(60,120) rotate(-18)">
+    <rect x="-4" y="-30" width="8" height="60" rx="4" fill="#fbbf24"/>
+    <rect x="-10" y="-38" width="20" height="14" rx="3" fill="#64748b"/>
+  </g>
+
+  <g transform="translate(155,270)">
+    <ellipse cx="55" cy="128" rx="42" ry="10" fill="#0f1830" opacity="0.5"/>
+
+    <path d="M20 62 Q10 40 30 30 L80 30 Q100 40 90 62 L86 118 Q86 128 76 128 L34 128 Q24 128 24 118 Z" fill="#2563eb"/>
+
+    <rect x="8" y="56" width="18" height="46" rx="9" fill="#f4c9a0"/>
+    <rect x="84" y="52" width="18" height="50" rx="9" fill="#f4c9a0" transform="rotate(-18 93 60)"/>
+
+    <g transform="rotate(-30 95 40)">
+      <rect x="88" y="6" width="10" height="56" rx="4" fill="#94a3b8"/>
+      <rect x="80" y="0" width="26" height="16" rx="4" fill="#334155"/>
+      <rect x="80" y="0" width="26" height="6" rx="3" fill="#475569"/>
+    </g>
+
+    <rect x="28" y="118" width="16" height="30" rx="6" fill="#1e293b"/>
+    <rect x="66" y="118" width="16" height="30" rx="6" fill="#1e293b"/>
+    <rect x="24" y="144" width="24" height="10" rx="4" fill="#0f172a"/>
+    <rect x="62" y="144" width="24" height="10" rx="4" fill="#0f172a"/>
+
+    <circle cx="55" cy="0" r="26" fill="#f4c9a0"/>
+    <path d="M29 -8 Q30 -30 55 -30 Q80 -30 81 -8 Q81 -18 55 -18 Q29 -18 29 -8 Z" fill="#2b2b2b"/>
+    <circle cx="46" cy="2" r="2.4" fill="#1e293b"/>
+    <circle cx="64" cy="2" r="2.4" fill="#1e293b"/>
+    <path d="M47 12 Q55 17 63 12" stroke="#c2703d" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+    <circle cx="38" cy="10" r="5" fill="#f6b48a" opacity="0.7"/>
+    <circle cx="72" cy="10" r="5" fill="#f6b48a" opacity="0.7"/>
+
+    <circle cx="60" cy="70" r="9" fill="#fbbf24"/>
+    <rect x="56" y="66" width="8" height="8" fill="#1e293b" transform="rotate(45 60 70)"/>
+  </g>
+
+  <g fill="none" stroke="#60a5fa" stroke-width="3" stroke-linecap="round" opacity="0.8">
+    <path d="M30 250 q10 -14 20 0"/>
+    <path d="M350 260 q-10 -14 -20 0"/>
+    <path d="M355 320 q-10 -14 -20 0"/>
+  </g>
+</svg>
